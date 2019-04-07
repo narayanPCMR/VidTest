@@ -1,0 +1,654 @@
+/* Original license message */
+
+/**************************************\
+* bmp2nes.c                            *
+* Windows .bmp to NES .chr converter   *
+*                                      ********************************\
+* Copyright 2000 Damian Yerrick                                        *
+*                                                                      *
+* This program is free software; you can redistribute it and/or modify *
+* it under the terms of the GNU General Public License as published by *
+* the Free Software Foundation; either version 2 of the License, or    *
+* (at your option) any later version.                                  *
+*                                                                      *
+* This program is distributed in the hope that it will be useful,      *
+* but WITHOUT ANY WARRANTY; without even the implied warranty of       *
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the        *
+* GNU General Public License for more details.                         *
+*                                                                      *
+* You should have received a copy of the GNU General Public License    *
+* along with this program; if not, write to the Free Software          *
+* Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.            *
+* Or view the License online at http://www.gnu.org/copyleft/gpl.html   *
+*                                                                      *
+* Damian Yerrick's World Wide Web pages are located at                 *
+*   http://come.to/yerrick                                             *
+*                                                                      *
+\**********************************************************************/
+
+//This code *should* be portable
+
+
+//Library Load, only for VC
+#ifdef _MSC_VER
+#pragma comment(lib, "libav\\avformat.lib")
+#pragma comment(lib, "libav\\avcodec.lib")
+#pragma comment(lib, "libav\\avutil.lib")
+#pragma comment(lib, "libav\\swscale.lib")
+#endif
+
+#include "Vid2NesFMV.h"
+
+//How many bits in a tile have to be different in order to encode it
+//Set to anything above 127 to disable fuzzy tile matching
+#define MATCH_THRES 128
+
+//Number of seconds of footage to encode (0 for entire)
+#define DUR_RENDER 0
+
+#define FRAMEW 256
+#define FRAMEH 240
+
+#define FRAMESKIP 4
+
+#define MORECOLORS true
+#define DOPIXELATE false
+
+//Standard Libraries
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <iterator>
+#include <map>
+#include <algorithm>
+
+//LibAV headers (using C)
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libswscale/swscale.h>
+#include <libavutil/imgutils.h>
+}
+
+typedef enum {
+	END = 0x00,
+	DELTASTART = 0x04,
+	DELTABYTE = 0x06,
+	CONSTBYTE = 0x08
+} FRAME;
+
+void convert_RGB2CHR(AVFrame *pixelData, unsigned int width, unsigned int height, unsigned char *pixData) {
+	unsigned char curByte, *pixPtr = pixData;
+
+	unsigned int x, y, cx, cy, cz, pixcolor;
+
+	//Raw RGB plane data
+	uint8_t *rgbData = pixelData->data[0];
+
+	for (y = 0; y < 240; y += 8) {
+		for (x = 0; x < 256; x += 8) {
+			for (cz = 0; cz < 2; cz++) {
+				for (cy = y; cy < y + 8; cy++) {
+					curByte = 0;
+					for (cx = x; cx < x + 8; cx++) {
+						//Shift in one bit per pixel (of each bit plane)
+						curByte <<= 1;
+
+						//Current pixel color
+#if DOPIXELATE
+						int rgbPixel = ((cy % 2 == 0 ? cy : (cy - 1))*width + (cx % 2 == 0 ? cx : (cx - 1))) * 3;
+#else
+						int rgbPixel = (cy*width + cx) * 3;
+#endif
+						//Greyscale
+						if (cx < width && cy < height)
+							pixcolor = (rgbData[rgbPixel] + rgbData[rgbPixel + 1] + rgbData[rgbPixel + 2]) / 3;
+						else
+							pixcolor = 0;
+
+						//Set bit plane pixel
+						curByte |= ((pixcolor / (MORECOLORS ? 64 : 128)) >> cz) & 1;
+					}
+
+					//Write the 8px line
+					*(pixPtr++) = curByte;
+				}
+			}
+		}
+	}
+}
+
+
+typedef struct {
+	uint16_t address;
+	uint8_t data;
+} FDIFF;
+
+typedef struct {
+	uint16_t address1;
+	uint16_t address2;
+} STILE;
+
+typedef struct {
+	unsigned char data[16];
+} TILE;
+
+
+bool diffSort(FDIFF i, FDIFF j) { return (i.address < j.address); }
+
+void writeTillLeft(int prevCount, char data, std::ofstream *fileP) {
+	while (prevCount > 0) {
+		char minim = prevCount > 255 ? 255 : prevCount;
+		*fileP << (char)FRAME::CONSTBYTE;
+		fileP->write((char*)&minim, 1);
+		fileP->write((char*)&data, 1);
+		prevCount -= 255;
+	}
+}
+
+void shoveSerialData(std::vector<uint8_t> *data, std::ofstream *fileP) {
+	if (data->size() == 0) return;
+
+	for (size_t i = 0; i < data->size(); i++) {
+		*fileP << (char)FRAME::DELTABYTE;
+		fileP->write((char*)&data[i], 1);
+	}
+
+	return;
+
+	if (data->size() == 1) {
+		*fileP << (char)FRAME::DELTABYTE;
+		fileP->write((char*)&data[0], 1);
+		return;
+	}
+
+	uint8_t prevChar = (*data)[0];
+	int prevCount = 0;
+	for (size_t i = 1; i < data->size(); i++) {
+		if (prevChar == (*data)[i]) {
+			prevCount++;
+		} else {
+			if (prevCount == 0) {
+				*fileP << (char)FRAME::DELTABYTE;
+				fileP->write((char*)&(*data)[i], 1);
+			} else
+				writeTillLeft(prevCount, prevChar, fileP);
+			prevCount = 0;
+		}
+
+		prevChar = (*data)[i];
+	}
+
+	//if (prevCount > 0) {
+	//	writeTillLeft(prevCount, prevChar, fileP);
+	//}
+}
+
+void pumpData(std::vector<FDIFF> diffBuff, std::ofstream *fileP) {
+	uint16_t addrPrev = 0, addr = 0;
+	unsigned int i;
+
+	std::sort(diffBuff.begin(), diffBuff.end(), diffSort);
+	std::vector<uint8_t> dataBuf;
+
+	for (i = 0; i < diffBuff.size(); i++) {
+		if (diffBuff[i].address - addrPrev != 1) {
+			*fileP << (char)FRAME::DELTASTART;
+			addr = ((diffBuff[i].address & 0xFF00) >> 8) + ((diffBuff[i].address & 0xFF) << 8);
+			fileP->write((char*)&addr, sizeof(uint16_t));
+			fileP->write((char*)&diffBuff[i].data, 1);
+		} else {
+			*fileP << (char)FRAME::DELTABYTE;
+			fileP->write((char*)&diffBuff[i].data, 1);
+			//dataBuf.push_back(diffBuff[i].data);
+		}
+
+		addrPrev = diffBuff[i].address;
+	}
+}
+
+void writeRLE(std::ofstream *file, char* buffer, int size) {
+	int countPos, i;
+	unsigned short counter;
+	short prevChar = -1;
+	bool matched = false;
+
+	if (size == 1) {
+		*file << 'C';
+		*file << *buffer;
+	}
+
+	for (i = 0; i < size; i++) {
+		if (buffer[i] == (char)prevChar) {
+			counter = 1;
+			for (countPos = i; countPos < size; countPos++) {
+				if (buffer[countPos] == (char)prevChar) counter++;
+				prevChar = (char)buffer[countPos];
+			}
+
+			if (counter > 3) {
+				*file << 'R';
+				file->write((char*)&counter, sizeof(unsigned short));
+				*file << buffer[i];
+			} else {
+				*file << 'B';
+				file->write((char*)&counter, sizeof(unsigned short));
+				file->write(buffer + i, counter);
+			}
+
+			i += counter;
+		}
+
+		prevChar = (char)buffer[i];
+	}
+}
+
+//Reset the nametable
+void resetNametable(unsigned char *ntMap) {
+	for (int i = 0; i < 960; i++)
+		ntMap[i] = 0;// (unsigned char)(i & 0xFF);
+}
+
+int lookFor(TILE *list, int size, TILE value) {
+	//Phase 1: find exact match
+	for (int i = 0; i < size; i++)
+		if (memcmp(&list[i].data, &value.data, sizeof(TILE)) == 0) return i;
+
+#if 1
+	//Phase 2: A more complex analysis
+	int matchTile = -1;
+	int minNumBits = MATCH_THRES;
+	for (int i = 0; i < size; i++) {
+		TILE t = list[i];
+
+		//For a 8x8x2 tile (128 bits), check how many bits are same
+		int numBits = 0;
+		for (int j = 0; j < 16; j++) {
+			uint8_t byte1 = t.data[j];
+			uint8_t byte2 = value.data[j];
+			for (int k = 0; k < 8; k++) {
+				int bit1 = (byte1 & (1 << k)) >> k;
+				int bit2 = (byte2 & (1 << k)) >> k;
+				if (bit1 == bit2) numBits++;
+			}
+		}
+
+		if (numBits > minNumBits) {
+			minNumBits = numBits;
+			matchTile = i;
+		}
+	}
+
+	return matchTile;
+#endif
+}
+
+int main(int argc, const char **argv) {
+	//Pattern data after converting a 256x240 frame
+	unsigned char nesData[0x3C00];
+
+	unsigned long totalWritten = 0;
+
+	//2 pattern tables (occupying both bg and spr table)
+	TILE patternTable[512];
+
+	//32*30 nametable grid + 64 bytes attribute table
+	unsigned char nametableMap[1024];
+
+	//Identical copy for delta encoding
+	TILE patternTablePrev[512];
+	TILE patternTable2[512];
+#ifdef MULT_NAM
+	unsigned char nametableMapPrev[2][960];
+#else
+	unsigned char nametableMapPrev[1024];
+#endif
+
+	//Clear to 0
+	memset(patternTable, 0, sizeof(patternTable));
+	memset(nametableMap, 0, sizeof(nametableMap));
+	memset(patternTablePrev, 0, sizeof(patternTablePrev));
+	memset(nametableMapPrev, 0, sizeof(nametableMapPrev));
+
+
+	//Input video
+	const char* fileName = "C:\\Users\\naray\\Downloads\\Bad Apple PV.mp4";
+
+	struct SwsContext *img_convert_ctx;
+	AVFormatContext *pFormatCtx = NULL;
+	unsigned int i, videoStream;
+	int frameNo = 0;
+	AVCodecContext *pCodecCtx;
+	AVCodec *pCodec;
+	AVFrame *pFrame;
+	AVFrame *pFrameRGB;
+	AVPacket packet;
+	int frameFinished;
+	int numBytes;
+	uint8_t *buffer;
+
+	av_register_all();
+
+	if (avformat_open_input(&pFormatCtx, fileName, NULL, 0) != 0)
+		return -1;
+
+	if (avformat_find_stream_info(pFormatCtx, 0) < 0)
+		return -1; // Couldn't find stream information
+
+	av_dump_format(pFormatCtx, 0, fileName, false);
+
+	videoStream = INT_MAX;
+
+	for (i = 0; i < pFormatCtx->nb_streams; i++)
+		if (pFormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
+			videoStream = i;
+			break;
+		}
+
+	if (videoStream == INT_MAX)
+		return -1; // Didn't find a video stream
+
+
+	pCodecCtx = pFormatCtx->streams[videoStream]->codec;
+
+	pCodec = avcodec_find_decoder(pCodecCtx->codec_id);
+
+	if (pCodec == NULL)
+		return -1; // Codec not found
+
+	if (avcodec_open2(pCodecCtx, pCodec, 0) < 0)
+		return -1; // Could not open codec
+
+	// Hack to correct wrong frame rates that seem to be generated by some codecs
+	if (pCodecCtx->time_base.num > 1000 && pCodecCtx->time_base.den == 1)
+		pCodecCtx->time_base.den = 1000;
+
+	pFrame = av_frame_alloc();
+	pFrameRGB = av_frame_alloc();
+
+	if (pFrameRGB == NULL)
+		return -1;
+
+	numBytes = av_image_get_buffer_size(AV_PIX_FMT_RGB24, FRAMEW, FRAMEH, AV_INPUT_BUFFER_PADDING_SIZE);
+	buffer = (uint8_t*)av_malloc(numBytes);
+
+	av_image_fill_arrays(pFrameRGB->data, pFrameRGB->linesize, buffer, AV_PIX_FMT_RGB24, FRAMEW, FRAMEH, AV_INPUT_BUFFER_PADDING_SIZE);
+	img_convert_ctx = sws_getContext(pCodecCtx->width, pCodecCtx->height, pCodecCtx->pix_fmt, FRAMEW, FRAMEH, AV_PIX_FMT_RGB24, SWS_BICUBIC, NULL, NULL, NULL);
+	pFrameRGB->width = FRAMEW;
+	pFrameRGB->height = FRAMEH;
+
+
+	std::ofstream fileP("D:\\badAppleP.dat", std::ios::binary | std::ios::out), filePD("D:\\badApplePD.dat", std::ios::binary | std::ios::out);
+	std::vector<FDIFF> diffBuff;
+	std::vector<STILE> patSame;
+	std::vector<unsigned int> skipAddr;
+
+#ifdef _TEST_CHARS
+	char tempDat[256];
+#endif
+
+	int namLoc;
+	bool doDecode = true;
+	unsigned int patternIdx;
+
+	int frameFail;
+	TILE findTile;
+	FDIFF f;
+
+	std::cout << std::endl;
+
+	while (av_read_frame(pFormatCtx, &packet) >= 0 && doDecode) {
+		if (packet.stream_index == videoStream) {
+			int ret = avcodec_send_packet(pCodecCtx, &packet);
+			while (ret >= 0 && doDecode) {
+				ret = avcodec_receive_frame(pCodecCtx, pFrame);
+				if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+					break;
+				else if (ret < 0) {
+					std::cout << std::endl << "error during decoding";
+					break;
+				}
+
+				//Frame has been decoded
+
+				//resetNametable(nametableMap);
+				diffBuff.clear();
+				patSame.clear();
+				skipAddr.clear();
+				namLoc = 0;
+				patternIdx = 0;
+				frameFail = 0;
+				frameNo++;
+
+				//Test
+				if (frameNo == 30 * DUR_RENDER) {
+					doDecode = false;
+					break;
+				}
+
+				if (frameNo % 2 == 1) continue;
+
+				sws_scale(img_convert_ctx, pFrame->data, pFrame->linesize, 0, pCodecCtx->height, pFrameRGB->data, pFrameRGB->linesize);
+
+				convert_RGB2CHR(pFrameRGB, pFrameRGB->width, pFrameRGB->height, nesData);
+
+				//Find common tiles
+				//1 tile = 16 bytes
+				for (i = 0; i < sizeof(nesData); i += sizeof(TILE)) {
+					memcpy(&findTile.data, nesData + i, sizeof(TILE));
+
+					//for (int j = 0; j < skipAddr.size(); j++)
+					//	if (patternIdx == skipAddr[j])
+					//		patternIdx++;
+
+					int loc = lookFor(patternTable, patternIdx, findTile);
+
+					if (loc != -1) {
+						nametableMap[namLoc++] = loc;
+					}
+					else {
+						nametableMap[namLoc++] = patternIdx;
+						patternTable[patternIdx++] = findTile;
+					}
+
+					if (patternIdx > 511 || namLoc > 960) {
+						frameFail = 1;
+						break;
+					}
+
+					//TODO: Make the nametable such that sprite pattern is after background pattern
+					//If we are using the sprite table
+					if (patternIdx > 255) {
+
+					}
+				}
+
+				if (frameFail) {
+					std::cout << std::endl << "Frame " << frameNo << " could not be compressed!" << std::endl;
+					continue;
+				}
+
+				int simByte = 0;
+
+#if 0
+				if (frameNo > 1) {
+					for (int i = 0; i < patternIdx * sizeof(TILE); i += sizeof(TILE)) {
+						if (memcmp((char*)(patternTable + i), (char*)(patternTablePrev + i), sizeof(TILE)) != 0) {
+							std::cout << std::endl << "Similar till byte: " << i << std::endl;
+							simByte = i;
+							break;
+						}
+					}
+				}
+#endif
+				uint8_t toWriteCHRPages = (uint8_t)(ceil((sizeof(TILE) * patternIdx) / 256.0));
+				uint8_t toWriteNTBPages = 4;
+				uint8_t wrChar;
+
+				if (memcmp(nametableMap, nametableMapPrev, 1024) == 0) {
+					toWriteNTBPages = 0;
+				}
+				else if (memcmp(nametableMap + 256, nametableMapPrev + 256, 768) == 0) {
+					toWriteNTBPages = 1;
+				}
+				else if (memcmp(nametableMap + 512, nametableMapPrev + 512, 512) == 0) {
+					toWriteNTBPages = 2;
+				}
+				else if (memcmp(nametableMap + 768, nametableMapPrev + 768, 256) == 0) {
+					toWriteNTBPages = 3;
+				}
+
+				//Cap Bandwidth
+				/*if (toWriteCHRPages > 7) {
+					toWriteCHRPages = 7;
+				}*/
+
+
+				if (frameNo % FRAMESKIP != 0)
+					toWriteCHRPages = toWriteNTBPages = 0;
+
+				toWriteCHRPages = 0;
+				toWriteNTBPages = 4;
+
+				totalWritten += (toWriteCHRPages + toWriteNTBPages) * 256;
+
+				//Maximim limit of UxROM on emulators
+				//TODO: Remove when suitable mapper is available
+#if 1
+				if (totalWritten >= 2080768) {
+					doDecode = false;
+					break;
+				}
+#endif
+				
+				if (toWriteCHRPages > 0) {
+					//fileP.write((char*)(patternTable), toWriteCHRPages * 256);
+				}
+				if (toWriteNTBPages > 0) {
+					fileP.write((char*)(nametableMap), toWriteNTBPages * 256);
+				}
+
+				wrChar = toWriteCHRPages;
+				//filePD.write((char*)&wrChar, sizeof(uint8_t));
+				wrChar = toWriteNTBPages;
+				filePD.write((char*)&wrChar, sizeof(uint8_t));
+
+				//int start = sizeof(TILE)*patternIdx;
+				//int length = (toWritePages * 256) - (sizeof(TILE)*patternIdx);
+				//if (length > 0) fileP.write((char *)(patternTablePrev)+start, length);
+
+
+
+				//P=put
+				//D=difference(change)
+				if (frameNo == 1) {
+					/*fileP << 'P';
+					fileP << '\0' << '\0';
+					writeRLE(&fileP, (char*)patternTable, sizeof(patternTable));
+
+					fileP << 'P';
+					fileP << '\x20' << '\0';
+					writeRLE(&fileP, (char*)nametableMap, sizeof(nametableMap));*/
+				} else {
+#if 0
+					//memcpy_s(patternTable2, sizeof(patternTable), patternTable, sizeof(patternTable));
+
+					//memcpy_s(&patternTable[i], sizeof(TILE), &patternTablePrev[i], sizeof(TILE));
+
+
+					//Minimize changes
+					for (unsigned int j = 0; j < 512; j++) {
+						int loc = lookFor(patternTablePrev, patternIdx, patternTable[j]);
+						if (loc >= 0 && loc != j) {
+							STILE fd;
+							fd.address1 = j;
+							fd.address2 = loc;
+							patSame.push_back(fd);
+						}
+					}
+
+					/*for (unsigned int j = 0; j < sizeof(patternTable); j += sizeof(TILE)) {
+						if (i == j) continue;
+						if (memcmp((char *)(patternTable)+i, (char *)(patternTablePrev)+j, sizeof(TILE)) == 0) {
+							memcpy_s(&findTile, sizeof(TILE), (char *)(patternTable)+i, sizeof(TILE));
+							memcpy_s((char *)(patternTable)+i, sizeof(TILE), (char *)(patternTablePrev)+j, sizeof(TILE));
+							memcpy_s((char *)(patternTablePrev)+j, sizeof(TILE), &findTile, sizeof(TILE));
+							//i = j = 0;
+						}
+					}*/
+#endif
+#if 0
+					//Pattern Table
+					for (i = 0; i < patternIdx * sizeof(TILE); i++) {
+						//if (i % 16 > 7) continue;
+						//TODO: Count number of bits different between the two
+						if (memcmp((char *)(patternTable)+i, (char *)(patternTablePrev)+i, 1) != 0) {
+							f.address = i;
+							memcpy_s(&f.data, 1, (char *)(patternTable)+i, 1);
+							diffBuff.push_back(f);
+						}
+					}
+#endif
+					//pumpData(diffBuff, &fileP);
+					diffBuff.clear();
+#if 0
+					//Nametable
+					for (i = 0; i < sizeof(nametableMap); i++) {
+#ifdef MULT_NAM
+						if (memcmp((char *)(nametableMap)+i, (char *)(nametableMapPrev[frameNo % 2]) + i, 1) != 0) {
+							f.address = 0x2000 + i + (frameNo % 2 == 0 ? 0 : 0x800);
+							memcpy_s(&f.data, 1, (char*)&nametableMap[i], 1);
+							if (frameNo % 2 == 0) diffBuff.push_back(f);
+						}
+#else
+						if (memcmp((char *)(nametableMap)+i, (char *)(nametableMapPrev)+i, 1) != 0) {
+							f.address = 0x2000 + i;
+							memcpy_s(&f.data, 1, (char*)&nametableMap[i], 1);
+							diffBuff.push_back(f);
+						}
+#endif
+					}
+#endif
+					//pumpData(diffBuff, &fileN);
+				}
+				//End of frame
+				//fileP << (char)FRAME::END;
+				//fileN << (char)FRAME::END;
+
+				if(toWriteCHRPages > 0) memcpy_s(patternTablePrev, sizeof(patternTablePrev), patternTable, sizeof(patternTable));
+#ifdef MULT_NAM
+				if (toWriteNTBPages > 0)memcpy_s(nametableMapPrev[frameNo % 2], sizeof(nametableMapPrev[frameNo % 2]), nametableMap, sizeof(nametableMap));
+#else
+				if (toWriteNTBPages > 0)memcpy_s(nametableMapPrev, sizeof(nametableMapPrev), nametableMap, sizeof(nametableMap));
+#endif
+				//Test
+#ifdef _TEST_CHARS
+				sprintf_s(tempDat, "E:\\file%d.chr", frameNo);
+				std::ofstream testF(tempDat, std::ios::binary);
+				testF.write((char *)patternTable, patternIdx * 16);
+				testF.close();
+
+				sprintf_s(tempDat, "E:\\file%d.nam", frameNo);
+				testF.open(tempDat, std::ios::binary);
+				testF.write((char *)nametableMap, sizeof(nametableMap));
+				testF.close();
+#endif
+
+
+				std::cout << "\r" << frameNo << " / " << pFormatCtx->streams[0]->nb_frames << " frames written";
+				
+				av_free_packet(&packet);
+				av_packet_unref(&packet);
+			}
+		}
+	}
+
+	filePD.close();
+	fileP.close();
+	av_frame_free(&pFrameRGB);
+	av_frame_free(&pFrame);
+	avcodec_free_context(&pCodecCtx);
+	av_free(buffer);
+
+	return EXIT_SUCCESS;
+}
