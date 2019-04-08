@@ -38,10 +38,14 @@ extern "C" {
 #include <SGLE.h>
 
 //Video Metadata
-#define OUTWIDTH 1280
-#define OUTHEIGHT 720
+#define OUTWIDTH 640
+#define OUTHEIGHT 480
 #define OUTCODEC AV_CODEC_ID_MPEG4
 #define OUTPXFMT AV_PIX_FMT_YUV420P
+
+//Output window size
+#define RENDERW 640
+#define RENDERH 480
 
 glWindow *mainGL;
 GLuint vao, vbo;
@@ -80,7 +84,7 @@ struct {
 void setupTextures() {
 	glGenTextures(1, &rgb_tex);
 	glBindTexture(GL_TEXTURE_2D, rgb_tex);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, OUTWIDTH, OUTHEIGHT, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, RENDERW, RENDERH, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 }
@@ -88,7 +92,7 @@ void setupTextures() {
 void setRGBPixels(uint8_t* pixels, int stride) {
 	glBindTexture(GL_TEXTURE_2D, rgb_tex);
 	glPixelStorei(GL_UNPACK_ROW_LENGTH, stride);
-	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, OUTWIDTH, OUTHEIGHT, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, RENDERW, RENDERH, GL_RGB, GL_UNSIGNED_BYTE, pixels);
 }
 
 void gameEngine(long dT) {
@@ -106,10 +110,9 @@ void gameEngine(long dT) {
 		memcpy_s(&pack, sizeof(pack), upck->data, upck->len);
 
 		if (pack.sig[0] != 0x01 || pack.sig[1] != 0x88 || pack.sig[2] != 0x28) {
-			std::cout << "Frame not correct" << std::endl;
-		}
-		else {
-			std::cout << "Packet of length " << pack.size << "B of " << pack.totalsize << "B" << std::endl;
+			std::cout << "Packet header not correct" << std::endl;
+		} else {
+			std::cout << "Received Packet of length " << pack.size << "B of " << pack.totalsize << "B" << std::endl;
 
 			if (pack.part == 0 && pack.totalparts == 1) {
 				dataBuf.clear();
@@ -155,8 +158,6 @@ void drawEngine() {
 	glDisable(GL_BLEND);
 }
 
-
-
 void decodeFrame(uint8_t* dataBuf, int size) {
 	rPacket->data = dataBuf;
 	rPacket->size = size;
@@ -180,7 +181,7 @@ void decodeFrame(uint8_t* dataBuf, int size) {
 			pFrame->linesize, 0, pFrame->height,
 			pOutFrame->data, pOutFrame->linesize);
 
-		setRGBPixels(pOutFrame->data[0], OUTWIDTH);
+		setRGBPixels(pOutFrame->data[0], RENDERW);
 
 		av_packet_unref(rPacket);
 	}
@@ -188,7 +189,7 @@ void decodeFrame(uint8_t* dataBuf, int size) {
 
 int main() {
 	//Create a GL window
-	mainGL = new glWindow("Output", OUTWIDTH, OUTHEIGHT, false);
+	mainGL = new glWindow("Output", RENDERW, RENDERH, false);
 
 	//Init SDLNet
 	SDLNet_Init();
@@ -227,22 +228,22 @@ int main() {
 	pOutFrame = av_frame_alloc();
 
 	/* Set up output frame */
-	pOutFrame->width = OUTWIDTH;
-	pOutFrame->height = OUTHEIGHT;
+	pOutFrame->width = RENDERW;
+	pOutFrame->height = RENDERH;
 	pOutFrame->format = AV_PIX_FMT_RGB24;
-	pOutFrameBufferSize = avpicture_get_size(AV_PIX_FMT_RGB24, OUTWIDTH, OUTHEIGHT);
+	pOutFrameBufferSize = avpicture_get_size(AV_PIX_FMT_RGB24, RENDERW, RENDERH);
 	pOutFrameBuffer = (uint8_t *)av_malloc(pOutFrameBufferSize);
 
 	//Fill the output frame
-	avpicture_fill((AVPicture *)pOutFrame, pOutFrameBuffer, AV_PIX_FMT_RGB24, OUTWIDTH, OUTHEIGHT);
+	avpicture_fill((AVPicture *)pOutFrame, pOutFrameBuffer, AV_PIX_FMT_RGB24, RENDERW, RENDERH);
 
 	//To convert to RGB
 	sws_ctx = sws_getContext(
 		OUTWIDTH,
 		OUTHEIGHT,
 		OUTPXFMT,
-		OUTWIDTH,
-		OUTHEIGHT,
+		RENDERW,
+		RENDERH,
 		AV_PIX_FMT_RGB24,
 		SWS_BILINEAR,
 		NULL,
