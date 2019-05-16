@@ -2,112 +2,37 @@
 //
 
 #include "pch.h"
-#include <iostream>
-#include <algorithm>
-#include <chrono>
+#include "VidTx.h"
+#include "config.h"
 
-//LibAV headers (using C)
-extern "C" {
-#include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libswscale/swscale.h>
-#include <libavutil/imgutils.h>
-}
-
-//Load LibAV Libraries, only for VC
+//Load LibAV Libraries
 #ifdef _MSC_VER
-#pragma comment(lib, "libav\\avformat.lib")
-#pragma comment(lib, "libav\\avcodec.lib")
-#pragma comment(lib, "libav\\avutil.lib")
-#pragma comment(lib, "libav\\swscale.lib")
+#pragma comment(lib, "ffmpeg\\avformat.lib")
+#pragma comment(lib, "ffmpeg\\avcodec.lib")
+#pragma comment(lib, "ffmpeg\\avutil.lib")
+#pragma comment(lib, "ffmpeg\\swscale.lib")
 #endif
 
-//SDLNet for transmitting over UDP
-//TODO: Use FTDI Serial over Laser
+//SDLNet for transmitting over TCP / UDP
 #ifdef _MSC_VER
 #pragma comment(lib, "sdl_net/SDL2_net.lib")
 #endif
-#define SDL_MAIN_HANDLED
-#include <SDL/SDL.h>
-#include <SDL/SDL_net.h>
 
+#ifdef _MSC_VER
+#pragma comment(lib, "ftdi/ftd2xx.lib")
+#endif
 
-/* Input video */
-const char* fileName = "C:\\Users\\naray\\Downloads\\Bad Apple PV.mp4";
-
-//Video Metadata
-#define OUTWIDTH 640
-#define OUTHEIGHT 480
-#define OUTCODEC AV_CODEC_ID_MPEG4
-#define OUTPXFMT AV_PIX_FMT_YUV420P
-
-//Comment to transcode at unlimited speed
-#define THROTTLE
-
-#define HBRate
-
+//TODO: Update deprecated functions
 
 //Output bit rate. Higher, the better quality and shorter transcode period, but also higher bandwidth
 #ifdef HBRate
 const int outBitRate = 40000000;
 #else
-const int outBitRate = 320000;
+const int outBitRate = 32000;
 #endif
-
-//Input codec and format
-AVCodec *pInputCodec;
-AVCodecContext *pInputCodecContext;
-AVFormatContext *pInputFormatCtx;
-struct SwsContext *sws_ctx;
-
-//Output codec and format
-AVCodec *outCodec;
-AVCodecContext *pOutputCodecContext;
-
-//Index of video stream in input file
-unsigned int videoStream;
-
-//Input and output frames
-AVFrame *pFrame, *pOutFrame;
-
-uint8_t *pOutFrameBuffer;
-
-//UDP Socket
-UDPsocket sock;
-IPaddress srvadd;
-
-struct avpkt {
-	uint8_t sig[3] = {0x01, 0x88, 0x28};
-	uint8_t part;
-	uint8_t totalparts;
-	uint64_t totalsize;
-	uint8_t data[32700];
-	uint64_t size;
-} pack;
-
-
-class Timer
-{
-public:
-	Timer() : beg_(clock_::now()) {}
-	void reset() { beg_ = clock_::now(); }
-	double elapsed() const {
-		return std::chrono::duration_cast<second_>
-			(clock_::now() - beg_).count();
-	}
-
-private:
-	typedef std::chrono::high_resolution_clock clock_;
-	typedef std::chrono::duration<double, std::ratio<1> > second_;
-	std::chrono::time_point<clock_> beg_;
-};
 
 
 /*
-Function to send raw data over UDP
-data - buffer to send
-size - length of the buffer
-*/
 void sendrData(UDPsocket *s, uint8_t *data, uint64_t size) {
 	UDPpacket **pck;
 	uint64_t dtPos = 0, dtSize = 0;
@@ -148,42 +73,42 @@ void sendrData(UDPsocket *s, uint8_t *data, uint64_t size) {
 	SDLNet_UDP_SendV(*s, pck, pack.part);
 	
 	SDLNet_FreePacketV(pck);
-}
+}*/
 
-int main() {
-	//Init all LibAV components
-	av_register_all();
-
+void loadVideo() {
 	//Load the video
 	if (avformat_open_input(&pInputFormatCtx, fileName, NULL, 0) != 0)
-		return EXIT_FAILURE;
+		return;
 
 	//Find video Stream
 	if (avformat_find_stream_info(pInputFormatCtx, 0) < 0)
-		return EXIT_FAILURE;
+		return;
+
 	videoStream = INT_MAX;
-	for (int i = 0; i < pInputFormatCtx->nb_streams; i++) {
+	for (unsigned int i = 0; i < pInputFormatCtx->nb_streams; i++) {
 		if (pInputFormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
 			videoStream = i;
 			break;
 		}
 	}
 	if (videoStream == INT_MAX)
-		return EXIT_FAILURE; // Didn't find a video stream
+		return;
 
 	//Create and Open Codec
 	pInputCodecContext = pInputFormatCtx->streams[videoStream]->codec;
 	pInputCodec = avcodec_find_decoder(pInputCodecContext->codec_id);
 
 	if (pInputCodec == NULL)
-		return EXIT_FAILURE; // Codec not found
+		return;
 
 	if (avcodec_open2(pInputCodecContext, pInputCodec, 0) < 0)
-		return EXIT_FAILURE; // Could not open codec
+		return;
 
 	if (pInputCodecContext->time_base.num > 1000 && pInputCodecContext->time_base.den == 1)
 		pInputCodecContext->time_base.den = 1000;
+}
 
+void allocFrames() {
 	//Allocate frames
 	pFrame = av_frame_alloc();
 	pOutFrame = av_frame_alloc();
@@ -199,28 +124,23 @@ int main() {
 
 	//Fill the output frame
 	avpicture_fill((AVPicture *)pOutFrame, pOutFrameBuffer, OUTPXFMT, OUTWIDTH, OUTHEIGHT);
+}
 
-
-	/* UDP Socket */
+void initTX() {
 	//Init SDLNet
 	SDLNet_Init();
 
-	//Open a UDP socket at port 2000, listening to all IPs
-	if (!(sock = SDLNet_UDP_Open(0))) {
-		fprintf(stderr, "SDLNet_UDP_Open: %s\n", SDLNet_GetError());
-		return EXIT_FAILURE;
-	}
-	if (SDLNet_ResolveHost(&srvadd, "127.0.0.1", 2000)) {
-		fprintf(stderr, "SDLNet_ResolveHost: %s\n", SDLNet_GetError());
-		return EXIT_FAILURE;
-	}
+#if TXMODE == MODE_TCP
+	outStream = new TCPStreamServer(9999);
+#elif TXMODE == MODE_UDP
+	outStream = new UDPStream(UDP_IP, UDP_PORT);
+#elif TXMODE == MODE_FTDI
+	outStream = new FTDIStream(0, FTDI_BAUD);
+#endif
+}
 
-	//To simulate data loss
-	SDLNet_UDP_SetPacketLoss(sock, 0);
-
-	/* Output video */
+void initOPFrame() {
 	//This should be same on receiving end
-	AVRational avr;
 	avr.den = 30;
 	avr.num = 1;
 	outCodec = avcodec_find_encoder(OUTCODEC);
@@ -230,10 +150,10 @@ int main() {
 	pOutputCodecContext->height = OUTHEIGHT;
 	pOutputCodecContext->pix_fmt = OUTPXFMT;
 	pOutputCodecContext->time_base = avr;
-	
+
 	if (avcodec_open2(pOutputCodecContext, outCodec, NULL) < 0) {
-		fprintf(stderr, "could not open codec\n");
-		return EXIT_FAILURE;
+		std::cout << "Could not open codec" << std::endl;
+		return;
 	}
 
 	//To convert the video to suitable format
@@ -244,94 +164,14 @@ int main() {
 		OUTWIDTH,
 		OUTHEIGHT,
 		OUTPXFMT,
-		SWS_BILINEAR,
+		SWS_BICUBIC,
 		NULL,
 		NULL,
 		NULL
 	);
+}
 
-	//Allocate Packets
-	AVPacket *inPkt, *outPkt;
-	inPkt = av_packet_alloc();
-	outPkt = av_packet_alloc();
-
-	std::cout << "Beginning transcoding..." << std::endl;
-
-	Timer t, updateTim;
-
-	int mxSize = 0, totalSize = 0, lastPkSize = 0;
-	int frames = 0;
-
-
-	//Transcode loop
-	while (av_read_frame(pInputFormatCtx, inPkt) >= 0) {
-		t.reset();
-		double elapsed = 0.0;
-
-		if (inPkt->stream_index == videoStream) {
-			int ret = avcodec_send_packet(pInputCodecContext, inPkt);
-			while (ret >= 0) {
-				ret = avcodec_receive_frame(pInputCodecContext, pFrame);
-				if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-					break;
-				else if (ret < 0) {
-					fprintf(stderr, "error during encoding\n");
-					return EXIT_FAILURE;
-				}
-
-				/* Post processing */
-
-				//Scale the frame to suit the output
-				sws_scale(
-					sws_ctx,
-					(uint8_t const * const *)pFrame->data,
-					pFrame->linesize, 0, pInputCodecContext->height,
-					pOutFrame->data, pOutFrame->linesize);
-				
-				//Encode the new frame
-				ret = avcodec_send_frame(pOutputCodecContext, pOutFrame);
-				
-				while (ret >= 0) {
-					ret = avcodec_receive_packet(pOutputCodecContext, outPkt);
-					if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-						break;
-					else if (ret < 0) {
-						fprintf(stderr, "error during encoding\n");
-						return EXIT_FAILURE;
-					}
-
-					//Record peak data size
-					mxSize = std::max(mxSize, outPkt->size);
-					totalSize += outPkt->size;
-					lastPkSize = outPkt->size;
-
-					//Send the frame packet
-					sendrData(&sock, outPkt->data, outPkt->size);
-
-					frames++;
-
-					elapsed = t.elapsed() * 1000.0;
-					
-					av_packet_unref(outPkt);
-				}
-			}
-
-			if (updateTim.elapsed() > 0.25) {
-				int average = totalSize / frames;
-				std::cout << "\r" << "Frame " << frames << " of size " << lastPkSize << " Bytes, Max: " << mxSize << " Bytes, " << totalSize << " Bytes total, Average " << average << " Bytes per frame, took " << elapsed << "ms";
-				updateTim.reset();
-			}
-
-#ifdef THROTTLE
-			//Sleep to maintain framerate if possible
-			_sleep((unsigned long)std::max(1000 * avr.num / avr.den - elapsed, 0.0));
-#endif
-		}
-
-		av_packet_unref(inPkt);
-	}
-
-	//Exit
+void freeAll() {
 	avcodec_free_context(&pInputCodecContext);
 	sws_freeContext(sws_ctx);
 	avcodec_free_context(&pOutputCodecContext);
@@ -344,7 +184,96 @@ int main() {
 	av_packet_free(&inPkt);
 	av_packet_free(&outPkt);
 
-	SDLNet_UDP_Close(sock);
+	outStream->close();
+}
+
+void allocPck() {
+	inPkt = av_packet_alloc();
+	outPkt = av_packet_alloc();
+}
+
+int main() {
+	Timer t, updateTim;
+	int mxSize = 0, totalSize = 0, lastPkSize = 0;
+	int frames = 0;
+
+	//Init all LibAV components
+	av_register_all();
+
+	loadVideo();
+	allocFrames();
+	initTX();
+	initOPFrame();
+	allocPck();
+
+	std::cout << "Beginning transcoding..." << std::endl;
+
+	//Transcode loop
+	while (av_read_frame(pInputFormatCtx, inPkt) >= 0) {
+		t.reset();
+		double elapsed = 0.0;
+
+		if (inPkt->stream_index == videoStream) {
+			int ret = avcodec_send_packet(pInputCodecContext, inPkt);
+			while (ret >= 0) {
+				ret = avcodec_receive_frame(pInputCodecContext, pFrame);
+				if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+					break;
+				else if (ret < 0)
+					return EXIT_FAILURE;
+
+				/* Post processing */
+
+				//Scale the frame to suit the output
+				sws_scale(sws_ctx,
+					(uint8_t const * const *)pFrame->data,
+					pFrame->linesize, 0, pInputCodecContext->height,
+					pOutFrame->data, pOutFrame->linesize);
+				
+
+				//Encode the new frame
+				ret = avcodec_send_frame(pOutputCodecContext, pOutFrame);
+				
+				while (ret >= 0) {
+					ret = avcodec_receive_packet(pOutputCodecContext, outPkt);
+					if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+						break;
+					else if (ret < 0) {
+						std::cout << "Error during encoding" << std::endl;
+						return EXIT_FAILURE;
+					}
+
+					//Record peak data size
+					mxSize = std::max(mxSize, outPkt->size);
+					totalSize += outPkt->size;
+					lastPkSize = outPkt->size;
+
+					//Send the frame packet
+					outStream->send(outPkt->data, outPkt->size);
+
+					frames++;
+					elapsed = t.elapsed() * 1000.0;
+					
+					av_packet_unref(outPkt);
+				}
+			}
+
+			if (updateTim.elapsed() > 0.25 && frames > 0) {
+				int average = totalSize / frames;
+				std::cout << "\r" << "F:" << frames << ", " << lastPkSize << "B, MAX: " << mxSize << "B, ALL: " << totalSize << "B, AVG: " << average << "B/frame, took " << elapsed << "ms (potential " << (1000.0 / elapsed) << "fps)";
+				updateTim.reset();
+			}
+
+#ifdef THROTTLE
+			//Sleep to maintain framerate if possible
+			Sleep((DWORD)std::max(1000 * avr.num / avr.den - elapsed, 0.0));
+#endif
+		}
+
+		av_packet_unref(inPkt);
+	}
+
+	freeAll();
 
 	return EXIT_SUCCESS;
 }

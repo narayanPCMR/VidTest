@@ -212,6 +212,7 @@ int main(int argc, const char **argv) {
 	bool doDecode = true;
 	int lastUsedTile = 0;
 	int patternPage = 0;
+	int totalWrite = 0;
 
 	int frameFail;
 
@@ -241,6 +242,15 @@ int main(int argc, const char **argv) {
 				sws_scale(img_convert_ctx, pFrame->data, pFrame->linesize, 0, pCodecCtx->height, pFrameRGB->data, pFrameRGB->linesize);
 				convert_RGB2CHR(pFrameRGB, pFrameRGB->width, pFrameRGB->height, nesData);
 
+				totalWrite += sizeof(nesData);
+
+				fileP.write((char*)(nesData), sizeof(nesData));
+				if (totalWrite > 8192 * 240) {
+					doDecode = false;
+					break;
+				}
+
+				/*
 				std::map<int, int> tiletonametable;
 #if 1
 
@@ -281,13 +291,13 @@ int main(int argc, const char **argv) {
 					}
 				}
 #endif
-
+*/
 				if (frameFail) {
 					std::cout << std::endl << "Frame " << frameNo << " could not be compressed!" << std::endl;
 					continue;
 				}
 
-				fileP.write((char*)(nametableMap), 0x400);
+				//fileP.write((char*)(nametableMap), 0x400);
 
 
 				std::cout << "\r" << frameNo << " / " << pFormatCtx->streams[0]->nb_frames << " frames written";
