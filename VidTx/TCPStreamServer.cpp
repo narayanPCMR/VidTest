@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "TCPStreamServer.h"
+#include <string>
 
 TCPStreamServer::TCPStreamServer() {}
 

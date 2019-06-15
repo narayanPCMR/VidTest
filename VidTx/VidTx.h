@@ -6,8 +6,8 @@
 #define NOMINMAX
 #define SDL_MAIN_HANDLED
 
-#include <SDL/SDL.h>
-#include <SDL/SDL_net.h>
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_net.h>
 
 #include "UDPStream.h"
 #include "FTDIStream.h"
@@ -16,10 +16,10 @@
 
 //LibAV headers (using C)
 extern "C" {
-#include <ffmpeg/libavcodec/avcodec.h>
-#include <ffmpeg/libavformat/avformat.h>
-#include <ffmpeg/libswscale/swscale.h>
-#include <ffmpeg/libavutil/imgutils.h>
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libswscale/swscale.h>
+#include <libavutil/imgutils.h>
 }
 
 

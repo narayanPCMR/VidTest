@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "FTDIStream.h"
 #include <iostream>
+#include <wtypes.h>
 
 FTDIStream::FTDIStream() {}
 
@@ -20,12 +21,35 @@ void FTDIStream::open(unsigned int device, unsigned long baud) {
 		return;
 
 	FT_ResetPort(this->ftdhdl);
-	FT_SetBitMode(this->ftdhdl, 0X00, FT_BITMODE_RESET);
+	FT_SetBitMode(this->ftdhdl, 0x00, FT_BITMODE_RESET);
 	FT_SetBaudRate(this->ftdhdl, baud);
+
+	this->ftThead = std::thread([=]() {
+		while (1) {
+			while (wBuffer.size() >= 65536) {
+				DWORD bWritten;
+
+				FT_Write(this->ftdhdl, &wBuffer[0], 65536, &bWritten);
+
+				wBuffer.erase(wBuffer.begin(), wBuffer.begin()+65536);
+			}
+
+			_sleep(1);
+		}
+	});
 }
 
 void FTDIStream::send(uint8_t *data, size_t size) {
-	BYTE *buf = data;
+	wBuffer.insert(wBuffer.end(), data, &data[size-1]);
+	
+	//
+	/*while (pos < size) {
+		memcpy_s(wBuffer, 65536, data+pos, 65536);
+
+		pos += sizeof(wBuffer);
+	}*/
+
+	/*BYTE *buf = data;
 	DWORD len = size;
 	FT_STATUS status;
 	DWORD written;
@@ -49,7 +73,7 @@ void FTDIStream::send(uint8_t *data, size_t size) {
 
 		len -= written;
 		buf += written;
-	}
+	}*/
 }
 
 void FTDIStream::close() {

@@ -7,15 +7,15 @@
 
 //Load LibAV Libraries
 #ifdef _MSC_VER
-#pragma comment(lib, "ffmpeg\\avformat.lib")
-#pragma comment(lib, "ffmpeg\\avcodec.lib")
-#pragma comment(lib, "ffmpeg\\avutil.lib")
-#pragma comment(lib, "ffmpeg\\swscale.lib")
+#pragma comment(lib, "ffmpeg/avformat.lib")
+#pragma comment(lib, "ffmpeg/avcodec.lib")
+#pragma comment(lib, "ffmpeg/avutil.lib")
+#pragma comment(lib, "ffmpeg/swscale.lib")
 #endif
 
 //SDLNet for transmitting over TCP / UDP
 #ifdef _MSC_VER
-#pragma comment(lib, "sdl_net/SDL2_net.lib")
+#pragma comment(lib, "sdl2_net/SDL2_net.lib")
 #endif
 
 #ifdef _MSC_VER
@@ -23,14 +23,6 @@
 #endif
 
 //TODO: Update deprecated functions
-
-//Output bit rate. Higher, the better quality and shorter transcode period, but also higher bandwidth
-#ifdef HBRate
-const int outBitRate = 40000000;
-#else
-const int outBitRate = 32000;
-#endif
-
 
 /*
 void sendrData(UDPsocket *s, uint8_t *data, uint64_t size) {
@@ -145,7 +137,7 @@ void initOPFrame() {
 	avr.num = 1;
 	outCodec = avcodec_find_encoder(OUTCODEC);
 	pOutputCodecContext = avcodec_alloc_context3(outCodec);
-	pOutputCodecContext->bit_rate = outBitRate;
+	pOutputCodecContext->bit_rate = OPBITRATE;
 	pOutputCodecContext->width = OUTWIDTH;
 	pOutputCodecContext->height = OUTHEIGHT;
 	pOutputCodecContext->pix_fmt = OUTPXFMT;
@@ -209,68 +201,72 @@ int main() {
 	std::cout << "Beginning transcoding..." << std::endl;
 
 	//Transcode loop
-	while (av_read_frame(pInputFormatCtx, inPkt) >= 0) {
-		t.reset();
-		double elapsed = 0.0;
+	while (true) {
+		frames = 0;
+		av_seek_frame(pInputFormatCtx, videoStream, 0, 0);
 
-		if (inPkt->stream_index == videoStream) {
-			int ret = avcodec_send_packet(pInputCodecContext, inPkt);
-			while (ret >= 0) {
-				ret = avcodec_receive_frame(pInputCodecContext, pFrame);
-				if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-					break;
-				else if (ret < 0)
-					return EXIT_FAILURE;
+		while (av_read_frame(pInputFormatCtx, inPkt) >= 0) {
+			t.reset();
+			double elapsed = 0.0;
 
-				/* Post processing */
-
-				//Scale the frame to suit the output
-				sws_scale(sws_ctx,
-					(uint8_t const * const *)pFrame->data,
-					pFrame->linesize, 0, pInputCodecContext->height,
-					pOutFrame->data, pOutFrame->linesize);
-				
-
-				//Encode the new frame
-				ret = avcodec_send_frame(pOutputCodecContext, pOutFrame);
-				
+			if (inPkt->stream_index == videoStream) {
+				int ret = avcodec_send_packet(pInputCodecContext, inPkt);
 				while (ret >= 0) {
-					ret = avcodec_receive_packet(pOutputCodecContext, outPkt);
+					ret = avcodec_receive_frame(pInputCodecContext, pFrame);
 					if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
 						break;
-					else if (ret < 0) {
-						std::cout << "Error during encoding" << std::endl;
+					else if (ret < 0)
 						return EXIT_FAILURE;
+
+					/* Post processing */
+
+					//Scale the frame to suit the output
+					sws_scale(sws_ctx,
+						(uint8_t const* const*)pFrame->data,
+						pFrame->linesize, 0, pInputCodecContext->height,
+						pOutFrame->data, pOutFrame->linesize);
+
+					//Encode the new frame
+					ret = avcodec_send_frame(pOutputCodecContext, pOutFrame);
+
+					while (ret >= 0) {
+						ret = avcodec_receive_packet(pOutputCodecContext, outPkt);
+						if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+							break;
+						else if (ret < 0) {
+							std::cout << "Error during encoding" << std::endl;
+							return EXIT_FAILURE;
+						}
+
+						//Record peak data size
+						mxSize = std::max(mxSize, outPkt->size);
+						totalSize += outPkt->size;
+						lastPkSize = outPkt->size;
+
+						//Send the frame packet
+						outStream->send(outPkt->data, outPkt->size);
+
+						frames++;
+						elapsed = t.elapsed() * 1000.0;
+
+						av_packet_unref(outPkt);
 					}
-
-					//Record peak data size
-					mxSize = std::max(mxSize, outPkt->size);
-					totalSize += outPkt->size;
-					lastPkSize = outPkt->size;
-
-					//Send the frame packet
-					outStream->send(outPkt->data, outPkt->size);
-
-					frames++;
-					elapsed = t.elapsed() * 1000.0;
-					
-					av_packet_unref(outPkt);
 				}
-			}
 
-			if (updateTim.elapsed() > 0.25 && frames > 0) {
-				int average = totalSize / frames;
-				std::cout << "\r" << "F:" << frames << ", " << lastPkSize << "B, MAX: " << mxSize << "B, ALL: " << totalSize << "B, AVG: " << average << "B/frame, took " << elapsed << "ms (potential " << (1000.0 / elapsed) << "fps)";
-				updateTim.reset();
-			}
+				if (updateTim.elapsed() > 0.25 && frames > 0) {
+					int average = totalSize / frames;
+					std::cout << "F:" << frames << ", " << lastPkSize << "B, MAX: " << mxSize << "B, ALL: " << totalSize << "B, AVG: " << average << "B/F, T:" << elapsed << "ms (potential " << (1000.0 / elapsed) << "fps)    \r";
+					updateTim.reset();
+				}
 
 #ifdef THROTTLE
-			//Sleep to maintain framerate if possible
-			Sleep((DWORD)std::max(1000 * avr.num / avr.den - elapsed, 0.0));
+				//Sleep to maintain framerate if possible
+				Sleep((DWORD)std::max(1000 * avr.num / avr.den - elapsed, 0.0));
 #endif
-		}
+			}
 
-		av_packet_unref(inPkt);
+			av_packet_unref(inPkt);
+		}
 	}
 
 	freeAll();

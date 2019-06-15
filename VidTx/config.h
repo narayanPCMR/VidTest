@@ -3,12 +3,11 @@
 #include <stdint.h>
 
 /* Input video */
-const char* fileName = "C:\\Users\\naray\\Downloads\\Bad Apple PV.mp4";
-//const char* fileName = "\\\\GAMING\\Anime\\Akkun to Kanojo\\Akkun to Kanojo 1.mp4";
+const char* fileName = "D:\\Downloads\\Pexels Videos 1672801.mp4";
 
 //Video Metadata
-#define OUTWIDTH		640
-#define OUTHEIGHT		480
+#define OUTWIDTH		1280
+#define OUTHEIGHT		720
 #define OUTCODEC		AV_CODEC_ID_MPEG4
 #define OUTPXFMT		AV_PIX_FMT_YUV420P
 
@@ -19,10 +18,10 @@ const char *UDP_IP = "192.168.1.22";
 const uint16_t UDP_PORT = 2000;
 
 //Comment to transcode at unlimited speed
-//#define THROTTLE
+#define THROTTLE
 
 //Switch high or low bitrate
-//#define HBRate
+#define OPBITRATE		3200000
 
 
 #define MODE_TCP		0

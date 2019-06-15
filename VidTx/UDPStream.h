@@ -3,7 +3,7 @@
 #include "Stream.h"
 
 #include <memory>
-#include <SDL/SDL_net.h>
+#include <SDL2/SDL_net.h>
 
 class UDPStream : public Stream {
 private:

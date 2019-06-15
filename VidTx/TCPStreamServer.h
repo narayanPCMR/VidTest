@@ -5,14 +5,14 @@
 #include <thread>
 #include <vector>
 
-#include <SDL/SDL_net.h>
+#include <SDL2/SDL_net.h>
 
 class TCPStreamServer : public Stream {
 private:
 	std::thread acceptT;
 	std::vector<TCPsocket> clients;
-	uint16_t port;
-	volatile bool run;
+	uint16_t port = 0;
+	volatile bool run = false;
 public:
 	TCPStreamServer();
 	TCPStreamServer(uint16_t port, bool useHTTP = false);
