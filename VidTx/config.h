@@ -6,12 +6,12 @@
 const char* fileName = "D:\\Downloads\\Pexels Videos 1672801.mp4";
 
 //Video Metadata
-#define OUTWIDTH		1280
-#define OUTHEIGHT		720
+#define OUTWIDTH		640
+#define OUTHEIGHT		360
 #define OUTCODEC		AV_CODEC_ID_MPEG4
 #define OUTPXFMT		AV_PIX_FMT_YUV420P
 
-#define FTDI_BAUD		2000000
+#define FTDI_BAUD		115200
 
 //UDP TX Port/IP
 const char *UDP_IP = "192.168.1.22";
@@ -21,8 +21,9 @@ const uint16_t UDP_PORT = 2000;
 #define THROTTLE
 
 //Switch high or low bitrate
-#define OPBITRATE		3200000
+unsigned int bitRate = 32000;
 
+int repeatTimes = 1;
 
 #define MODE_TCP		0
 #define MODE_UDP		1

@@ -5,6 +5,7 @@
 #include <ftdi/ftd2xx.h>
 #include <thread>
 #include <vector>
+#include <mutex>
 
 class FTDIStream : public Stream {
 private:
@@ -12,9 +13,16 @@ private:
 	std::thread ftThead;
 	unsigned int devIdx = 0;
 	unsigned long baudRate = 0;
+	unsigned int failCount = 0;
+	volatile bool run = false;
+
+	std::mutex writeLock;
 
 	std::vector<uint8_t> wBuffer;
 	uint16_t wBufferPos = 0;
+
+	bool tryConnect();
+	void writeBuffer(DWORD bytes);
 public:
 	FTDIStream();
 	FTDIStream(unsigned int device, unsigned long baud);

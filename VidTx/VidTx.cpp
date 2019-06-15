@@ -137,7 +137,7 @@ void initOPFrame() {
 	avr.num = 1;
 	outCodec = avcodec_find_encoder(OUTCODEC);
 	pOutputCodecContext = avcodec_alloc_context3(outCodec);
-	pOutputCodecContext->bit_rate = OPBITRATE;
+	pOutputCodecContext->bit_rate = bitRate;
 	pOutputCodecContext->width = OUTWIDTH;
 	pOutputCodecContext->height = OUTHEIGHT;
 	pOutputCodecContext->pix_fmt = OUTPXFMT;
@@ -201,7 +201,7 @@ int main() {
 	std::cout << "Beginning transcoding..." << std::endl;
 
 	//Transcode loop
-	while (true) {
+	do {
 		frames = 0;
 		av_seek_frame(pInputFormatCtx, videoStream, 0, 0);
 
@@ -267,7 +267,7 @@ int main() {
 
 			av_packet_unref(inPkt);
 		}
-	}
+	} while (repeatTimes--);
 
 	freeAll();
 
