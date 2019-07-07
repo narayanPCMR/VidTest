@@ -5,7 +5,7 @@
 #include "VidTx.h"
 #include "config.h"
 
-//Load LibAV Libraries
+//Load FFmpeg Libraries
 #ifdef _MSC_VER
 #pragma comment(lib, "ffmpeg/avformat.lib")
 #pragma comment(lib, "ffmpeg/avcodec.lib")
@@ -67,14 +67,14 @@ void sendrData(UDPsocket *s, uint8_t *data, uint64_t size) {
 	SDLNet_FreePacketV(pck);
 }*/
 
-void loadVideo() {
+bool loadVideo() {
 	//Load the video
 	if (avformat_open_input(&pInputFormatCtx, fileName, NULL, 0) != 0)
-		return;
+		return false;
 
 	//Find video Stream
 	if (avformat_find_stream_info(pInputFormatCtx, 0) < 0)
-		return;
+		return false;
 
 	videoStream = INT_MAX;
 	for (unsigned int i = 0; i < pInputFormatCtx->nb_streams; i++) {
@@ -84,20 +84,22 @@ void loadVideo() {
 		}
 	}
 	if (videoStream == INT_MAX)
-		return;
+		return false;
 
 	//Create and Open Codec
 	pInputCodecContext = pInputFormatCtx->streams[videoStream]->codec;
 	pInputCodec = avcodec_find_decoder(pInputCodecContext->codec_id);
 
 	if (pInputCodec == NULL)
-		return;
+		return false;
 
 	if (avcodec_open2(pInputCodecContext, pInputCodec, 0) < 0)
-		return;
+		return false;
 
 	if (pInputCodecContext->time_base.num > 1000 && pInputCodecContext->time_base.den == 1)
 		pInputCodecContext->time_base.den = 1000;
+
+	return true;
 }
 
 void allocFrames() {
@@ -131,7 +133,7 @@ void initTX() {
 #endif
 }
 
-void initOPFrame() {
+bool initOPFrame() {
 	//This should be same on receiving end
 	avr.den = 30;
 	avr.num = 1;
@@ -142,10 +144,11 @@ void initOPFrame() {
 	pOutputCodecContext->height = OUTHEIGHT;
 	pOutputCodecContext->pix_fmt = OUTPXFMT;
 	pOutputCodecContext->time_base = avr;
+	pOutputCodecContext->max_b_frames = 8;
 
 	if (avcodec_open2(pOutputCodecContext, outCodec, NULL) < 0) {
 		std::cout << "Could not open codec" << std::endl;
-		return;
+		return false;
 	}
 
 	//To convert the video to suitable format
@@ -161,6 +164,8 @@ void initOPFrame() {
 		NULL,
 		NULL
 	);
+
+	return true;
 }
 
 void freeAll() {
@@ -185,17 +190,24 @@ void allocPck() {
 }
 
 int main() {
+	/* Debug information */
 	Timer t, updateTim;
-	int mxSize = 0, totalSize = 0, lastPkSize = 0;
+	int mxSize = 0, totalSize = 0, lastPkSize = 0, prevTotal = 0;
 	int frames = 0;
 
-	//Init all LibAV components
-	av_register_all();
+	//Presentation Timestamp for encoder
+	int pts_ct = 0;
 
-	loadVideo();
+	if (!loadVideo())
+		return EXIT_FAILURE;
+
 	allocFrames();
+	
 	initTX();
-	initOPFrame();
+	
+	if (!initOPFrame())
+		return EXIT_FAILURE;
+	
 	allocPck();
 
 	std::cout << "Beginning transcoding..." << std::endl;
@@ -226,6 +238,8 @@ int main() {
 						pFrame->linesize, 0, pInputCodecContext->height,
 						pOutFrame->data, pOutFrame->linesize);
 
+					pOutFrame->pts = pts_ct++;
+
 					//Encode the new frame
 					ret = avcodec_send_frame(pOutputCodecContext, pOutFrame);
 
@@ -243,6 +257,27 @@ int main() {
 						totalSize += outPkt->size;
 						lastPkSize = outPkt->size;
 
+						/* RX SOLUTION!!!! */
+						/*
+						AVCodecParserContext* cpc;
+						cpc = av_parser_init(OUTCODEC);
+
+						uint8_t* in_data = outPkt->data;
+						int in_len = outPkt->size;
+
+						uint8_t* data;
+						int size, len;
+
+						while (in_len) {
+							len = av_parser_parse2(cpc, pOutputCodecContext, &data, &size, outPkt->data, outPkt->size, outPkt->pts, outPkt->dts, 0);
+
+							in_data += len;
+							in_len -= len;
+
+							if (size)
+								decode(data, size);
+						}*/
+
 						//Send the frame packet
 						outStream->send(outPkt->data, outPkt->size);
 
@@ -255,7 +290,8 @@ int main() {
 
 				if (updateTim.elapsed() > 0.25 && frames > 0) {
 					int average = totalSize / frames;
-					std::cout << "F:" << frames << ", " << lastPkSize << "B, MAX: " << mxSize << "B, ALL: " << totalSize << "B, AVG: " << average << "B/F, T:" << elapsed << "ms (potential " << (1000.0 / elapsed) << "fps)    \r";
+					std::cout << "F:" << frames << ", " << lastPkSize << "B, MAX: " << mxSize << "B, ALL: " << totalSize << "B, AVG: " << average << "B/F (" << ((totalSize - prevTotal) * avr.den / avr.num) << "B/s" << "), T:" << elapsed << "ms (potential " << (1000.0 / elapsed) << "fps)    \r";
+					prevTotal = totalSize;
 					updateTim.reset();
 				}
 

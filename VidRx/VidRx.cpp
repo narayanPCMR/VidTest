@@ -7,7 +7,7 @@
 
 #include <ftdi/ftd2xx.h>
 
-//LibAV headers (using C)
+//FFmpeg headers (using C)
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -15,37 +15,41 @@ extern "C" {
 #include <libavutil/imgutils.h>
 }
 
-//Load LibAV Libraries, only for VC
+//Load FFmpeg Libraries
 #ifdef _MSC_VER
-#pragma comment(lib, "libav\\avformat.lib")
-#pragma comment(lib, "libav\\avcodec.lib")
-#pragma comment(lib, "libav\\avutil.lib")
-#pragma comment(lib, "libav\\swscale.lib")
+#pragma comment(lib, "ffmpeg/avformat.lib")
+#pragma comment(lib, "ffmpeg/avcodec.lib")
+#pragma comment(lib, "ffmpeg/avutil.lib")
+#pragma comment(lib, "ffmpeg/swscale.lib")
 #endif
 
-
-//SDLNet for receiving over UDP
-//TODO: Use FTDI Serial over Laser
+//SDLNet for transmitting over TCP / UDP
 #ifdef _MSC_VER
-#pragma comment(lib, "sdl_net/SDL2_net.lib")
-#pragma comment(lib, "SGLE.lib")
+#pragma comment(lib, "sdl2/SDL2.lib")
+#pragma comment(lib, "sdl2_net/SDL2_net.lib")
+
+//GL Render engine
+#ifdef _DEBUG
+#pragma comment(lib, "sgle/Debug/SGLE.lib")
+#else
+#pragma comment(lib, "sgle/Release/SGLE.lib")
 #endif
+
+#endif
+
 #define SDL_MAIN_HANDLED
-#include <SDL/SDL.h>
-#include <SDL/SDL_net.h>
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_net.h>
 
 //GL renderer
-#include <SGLE.h>
+#include <sgle/SGLE.h>
 
-//Video Metadata
-#define OUTWIDTH 640
-#define OUTHEIGHT 480
+//Video Codec
 #define OUTCODEC AV_CODEC_ID_MPEG4
-#define OUTPXFMT AV_PIX_FMT_YUV420P
 
 //Output window size
-#define RENDERW 640
-#define RENDERH 480
+#define RENDERW 1280
+#define RENDERH 720
 
 glWindow *mainGL;
 GLuint vao, vbo;
@@ -55,7 +59,7 @@ GLuint prog;
 //Input codec and format
 AVCodec *pCodec;
 AVCodecContext *pCodecCtx;
-struct SwsContext *sws_ctx;
+struct SwsContext *sws_ctx = nullptr;
 
 //Ouput frame
 AVFrame *pFrame, *pOutFrame;
@@ -63,15 +67,19 @@ uint8_t *pOutFrameBuffer;
 int pOutFrameBufferSize;
 
 //Codec packet
-AVPacket *rPacket;
+
 
 //UDP Socket
 UDPsocket sock;
 
+AVPacket* tPck;
+
+AVCodecParserContext* cpc;
+
 std::vector<uint8_t> dataBuf;
 
-void decodeFrame(uint8_t* dataBuf, int size);
-
+void decodeFrame(AVPacket* rPacket);
+/*
 struct {
 	uint8_t sig[3];
 	uint8_t part;
@@ -79,7 +87,7 @@ struct {
 	uint64_t totalsize;
 	uint8_t data[32700];
 	uint64_t size;
-} pack;
+} pack;*/
 
 void setupTextures() {
 	glGenTextures(1, &rgb_tex);
@@ -97,43 +105,27 @@ void setRGBPixels(uint8_t* pixels, int stride) {
 
 void gameEngine(long dT) {
 	UDPpacket *upck;
-	std::vector< std::vector<uint8_t>::iterator> points;
 
 	//Allocate a packet vector to receive
 	if (!(upck = SDLNet_AllocPacket(32768))) {
 		fprintf(stderr, "SDLNet_AllocPacket: %s\n", SDLNet_GetError()); exit(EXIT_FAILURE);
 	}
-	
+
 	//Receive data packets
 	int retCode;
 	while ((retCode = SDLNet_UDP_Recv(sock, upck))) {
-		memcpy_s(&pack, sizeof(pack), upck->data, upck->len);
+		uint8_t* in_data = upck->data;
+		int in_len = upck->len;
+		int len;
 
-		if (pack.sig[0] != 0x01 || pack.sig[1] != 0x88 || pack.sig[2] != 0x28) {
-			std::cout << "Packet header not correct" << std::endl;
-		} else {
-			std::cout << "Received Packet of length " << pack.size << "B of " << pack.totalsize << "B" << std::endl;
+		while (in_len) {
+			len = av_parser_parse2(cpc, pCodecCtx, &tPck->data, &tPck->size, in_data, in_len, AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
 
-			if (pack.part == 0 && pack.totalparts == 1) {
-				dataBuf.clear();
-				decodeFrame(pack.data, pack.size);
-				break;
-			} else if (pack.part == 0) {
-				dataBuf.clear();
-				dataBuf.insert(dataBuf.end(), pack.data, pack.data + pack.size);
-			} else {
-				dataBuf.insert(dataBuf.end(), pack.data, pack.data + pack.size);
+			in_data += len;
+			in_len -= len;
 
-				if (pack.part == pack.totalparts - 1) {
-					if (dataBuf.size() != pack.totalsize) {
-						std::cout << "Missing: got " << dataBuf.size() << " bytes, expected " << pack.totalsize << std::endl;
-					}
-
-					decodeFrame(&dataBuf[0], dataBuf.size());
-					dataBuf.clear();
-					break;
-				}
-			}
+			if (tPck->size)
+				decodeFrame(tPck);
 		}
 	}
 
@@ -158,10 +150,7 @@ void drawEngine() {
 	glDisable(GL_BLEND);
 }
 
-void decodeFrame(uint8_t* dataBuf, int size) {
-	rPacket->data = dataBuf;
-	rPacket->size = size;
-
+void decodeFrame(AVPacket *rPacket) {
 	int ret = avcodec_send_packet(pCodecCtx, rPacket);
 	while (ret >= 0) {
 		ret = avcodec_receive_frame(pCodecCtx, pFrame);
@@ -175,13 +164,34 @@ void decodeFrame(uint8_t* dataBuf, int size) {
 		}
 
 		//Convert YUV to RGB
-		sws_scale(
-			sws_ctx,
-			(uint8_t const * const *)pFrame->data,
-			pFrame->linesize, 0, pFrame->height,
-			pOutFrame->data, pOutFrame->linesize);
+		if (sws_ctx == nullptr) {
+			if (pFrame->width == 0 || pFrame->height == 0 || pFrame->format == -1)
+				break;
 
-		setRGBPixels(pOutFrame->data[0], RENDERW);
+			//To convert to RGB
+			sws_ctx = sws_getContext(
+				pFrame->width,
+				pFrame->height,
+				static_cast <AVPixelFormat>(pFrame->format),
+				RENDERW,
+				RENDERH,
+				AV_PIX_FMT_RGB24,
+				SWS_BILINEAR,
+				NULL,
+				NULL,
+				NULL
+			);
+		}
+
+		if (sws_ctx != nullptr) {
+			sws_scale(
+				sws_ctx,
+				(uint8_t const* const*)pFrame->data,
+				pFrame->linesize, 0, pFrame->height,
+				pOutFrame->data, pOutFrame->linesize);
+
+			setRGBPixels(pOutFrame->data[0], RENDERW);
+		}
 
 		av_packet_unref(rPacket);
 	}
@@ -204,28 +214,30 @@ int main() {
 		fprintf(stderr, "SDLNet_UDP_Open: %s\n", SDLNet_GetError()); exit(EXIT_FAILURE);
 	}
 
-	//Init all LibAV components
-	av_register_all();
-
 	//Create and Open Codec
 	pCodec = avcodec_find_decoder(OUTCODEC);
 	pCodecCtx = avcodec_alloc_context3(pCodec);
-	pCodecCtx->pix_fmt = OUTPXFMT;
-	pCodecCtx->width = OUTWIDTH;
-	pCodecCtx->height = OUTHEIGHT;
+	if (OUTCODEC == AV_CODEC_ID_MPEG4) {
+		pCodecCtx->width = RENDERW;
+		pCodecCtx->height = RENDERH;
+	}
 
 	if (pCodec == NULL)
 		return -1; // Codec not found
 
+	if (pCodec->capabilities & AV_CODEC_CAP_TRUNCATED)
+		pCodecCtx->flags |= AV_CODEC_FLAG_TRUNCATED;
+
 	if (avcodec_open2(pCodecCtx, pCodec, 0) < 0)
 		return -1; // Could not open codec
-
-	//Allocate Packet
-	rPacket = av_packet_alloc();
 
 	//Input frame and RGB frame
 	pFrame = av_frame_alloc();
 	pOutFrame = av_frame_alloc();
+
+	tPck = av_packet_alloc();
+
+	cpc = av_parser_init(OUTCODEC);
 
 	/* Set up output frame */
 	pOutFrame->width = RENDERW;
@@ -236,20 +248,6 @@ int main() {
 
 	//Fill the output frame
 	avpicture_fill((AVPicture *)pOutFrame, pOutFrameBuffer, AV_PIX_FMT_RGB24, RENDERW, RENDERH);
-
-	//To convert to RGB
-	sws_ctx = sws_getContext(
-		OUTWIDTH,
-		OUTHEIGHT,
-		OUTPXFMT,
-		RENDERW,
-		RENDERH,
-		AV_PIX_FMT_RGB24,
-		SWS_BILINEAR,
-		NULL,
-		NULL,
-		NULL
-	);
 
 	setupTextures();
 
@@ -273,13 +271,14 @@ int main() {
 	delete mainGL;
 
 	avcodec_free_context(&pCodecCtx);
-	sws_freeContext(sws_ctx);
+	
+	if (sws_ctx != nullptr)
+		sws_freeContext(sws_ctx);
 
+	av_packet_free(&tPck);
 	av_frame_free(&pFrame);
 	av_frame_free(&pOutFrame);
 	av_free(pOutFrameBuffer);
-
-	av_packet_free(&rPacket);
 
 	SDLNet_UDP_Close(sock);
 	SDL_Quit();

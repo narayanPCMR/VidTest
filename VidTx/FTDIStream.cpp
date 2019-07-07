@@ -28,7 +28,7 @@ bool FTDIStream::tryConnect() {
 }
 
 void FTDIStream::writeBuffer(DWORD bytes) {
-	DWORD bWritten;
+	DWORD bWritten = 0;
 	FT_STATUS wStat;
 	bool lock = false;
 
@@ -50,7 +50,9 @@ void FTDIStream::writeBuffer(DWORD bytes) {
 		}
 	} while (wStat != FT_OK);
 
-	wBuffer.erase(wBuffer.begin(), wBuffer.begin() + bWritten);
+	if (bWritten <= bytes) {
+		wBuffer.erase(wBuffer.begin(), wBuffer.begin() + bytes);
+	}
 
 	if (lock)
 		writeLock.unlock();
