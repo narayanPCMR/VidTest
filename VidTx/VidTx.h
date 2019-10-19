@@ -25,28 +25,33 @@ extern "C" {
 
 //Input codec and format
 AVRational avr;
-AVCodec *pInputCodec;
-AVCodecContext *pInputCodecContext;
-AVFormatContext *pInputFormatCtx;
-struct SwsContext *sws_ctx;
+AVCodec* pInputCodec;
+AVCodecContext* pInputCodecContext;
+AVFormatContext* pInputFormatCtx;
+struct SwsContext* sws_ctx;
 
 //Output codec and format
-AVCodec *outCodec;
-AVCodecContext *pOutputCodecContext;
+AVCodec* outCodec;
+AVIOContext* pAVIO;
+AVCodecContext* pOutputCodecContext;
+AVOutputFormat* pOutputFormat;
+AVFormatContext* m_outformat;
+AVStream* outVideoStream;
+uint8_t outWriteBuffer[1024];
 
 //Index of video stream in input file
 unsigned int videoStream;
 
 //Input and output frames
-AVFrame *pFrame, *pOutFrame;
+AVFrame* pFrame, * pOutFrame;
 
 //Input and output video packets
-AVPacket *inPkt, *outPkt;
+AVPacket* inPkt, * outPkt;
 
-uint8_t *pOutFrameBuffer;
+uint8_t* pOutFrameBuffer;
 
 //Output Streams
-Stream *outStream;
+Stream* outStream;
 
 
 struct avpkt {

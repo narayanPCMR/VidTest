@@ -1,6 +1,9 @@
 // VidTx.cpp : This file contains the 'main' function. Program execution begins and ends there.
 //
 
+//TODO: Refer to https://github.com/leixiaohua1020/simplest_ffmpeg_mem_handler/blob/master/simplest_ffmpeg_mem_transcoder/simplest_ffmpeg_mem_transcoder.cpp
+//TODO: Byte (de)stuffing
+
 #include "pch.h"
 #include "VidTx.h"
 #include "config.h"
@@ -135,8 +138,8 @@ void initTX() {
 
 bool initOPFrame() {
 	//This should be same on receiving end
-	avr.den = 30;
-	avr.num = 1;
+	avr.den = pInputCodecContext->time_base.den;
+	avr.num = pInputCodecContext->time_base.num;
 	outCodec = avcodec_find_encoder(OUTCODEC);
 	pOutputCodecContext = avcodec_alloc_context3(outCodec);
 	pOutputCodecContext->bit_rate = bitRate;
@@ -145,6 +148,20 @@ bool initOPFrame() {
 	pOutputCodecContext->pix_fmt = OUTPXFMT;
 	pOutputCodecContext->time_base = avr;
 	pOutputCodecContext->max_b_frames = 8;
+
+	m_outformat = avformat_alloc_context();
+	pAVIO = avio_alloc_context(outWriteBuffer, sizeof(outWriteBuffer), AVIO_FLAG_WRITE, nullptr,
+		nullptr, [](void* opaque, unsigned char* buf, int buf_size) -> int {
+			
+
+			return buf_size;
+		}, nullptr);
+
+	pOutputFormat = av_guess_format(NULL, NULL, "video/mp4");
+	m_outformat->oformat = pOutputFormat;
+	outVideoStream = avformat_new_stream(m_outformat, outCodec);
+	m_outformat->pb = pAVIO;
+
 
 	if (avcodec_open2(pOutputCodecContext, outCodec, NULL) < 0) {
 		std::cout << "Could not open codec" << std::endl;
@@ -164,6 +181,8 @@ bool initOPFrame() {
 		NULL,
 		NULL
 	);
+
+	avformat_write_header(m_outformat, NULL);
 
 	return true;
 }
@@ -278,8 +297,12 @@ int main() {
 								decode(data, size);
 						}*/
 
+
+						av_interleaved_write_frame(m_outformat, outPkt);
+
 						//Send the frame packet
-						outStream->send(outPkt->data, outPkt->size);
+						
+						//outStream->send(outPkt->data, outPkt->size);
 
 						frames++;
 						elapsed = t.elapsed() * 1000.0;
