@@ -1,13 +1,13 @@
 #pragma once
 
-#include "Stream.h"
+#include "WriteStream.h"
 
 #include <thread>
 #include <vector>
 
 #include <SDL2/SDL_net.h>
 
-class TCPStreamServer : public Stream {
+class TCPStreamServer : public WriteStream {
 private:
 	std::thread acceptT;
 	std::vector<TCPsocket> clients;

@@ -1,13 +1,13 @@
 #pragma once
 
-#include "Stream.h"
+#include "WriteStream.h"
 #include <algorithm>
 #include <ftdi/ftd2xx.h>
 #include <thread>
 #include <vector>
 #include <mutex>
 
-class FTDIStream : public Stream {
+class FTDIStream : public WriteStream {
 private:
 	FT_HANDLE ftdhdl = NULL;
 	std::thread ftThead;

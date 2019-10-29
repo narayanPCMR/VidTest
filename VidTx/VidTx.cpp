@@ -4,6 +4,25 @@
 //TODO: Refer to https://github.com/leixiaohua1020/simplest_ffmpeg_mem_handler/blob/master/simplest_ffmpeg_mem_transcoder/simplest_ffmpeg_mem_transcoder.cpp
 //TODO: Byte (de)stuffing
 
+
+/*
+			 AVIOContext -> [File / UDP / TCP / FTDI]
+				  |
+			AVFormatContext-----.
+								|
+								|
+			.--- AVCodec----.	|
+			|				|	|
+	AVCodecContext			AVStream
+		|		|
+		|		|
+	AVFrame -> AVPacket
+		|  (After encoding)
+		|
+		|
+	uint8_t* (Frame Buffer)
+*/
+
 #include "pch.h"
 #include "VidTx.h"
 #include "config.h"
@@ -25,92 +44,31 @@
 #pragma comment(lib, "ftdi/ftd2xx.lib")
 #endif
 
-//TODO: Update deprecated functions
+//"Modern" version
+static void fill_yuv_image(AVFrame* pict, int frame_index, int width, int height) {
+	int x, y, i;
 
-/*
-void sendrData(UDPsocket *s, uint8_t *data, uint64_t size) {
-	UDPpacket **pck;
-	uint64_t dtPos = 0, dtSize = 0;
-	const int maxPks = 64;
+	i = frame_index;
 
-	if (!(pck = SDLNet_AllocPacketV(maxPks, 32768))) {
-		fprintf(stderr, "SDLNet_AllocPacket: %s\n", SDLNet_GetError());
-		return;
-	}
+	/* Y */
+	for (y = 0; y < height; y++)
+		for (x = 0; x < width; x++)
+			pict->data[0][y * pict->linesize[0] + x] = x + y + i * 3;
 
-	pack.part = 0;
-	pack.totalsize = size;
-	
-	while (dtPos < size) {
-		dtSize = size - dtPos;
-		if (dtSize > sizeof(pack.data))
-			dtSize = sizeof(pack.data);
-
-		pack.size = dtSize;
-		memcpy_s(pack.data, sizeof(pack.data), data+dtPos, dtSize);
-
-		//Sending
-		memcpy_s(pck[pack.part]->data, pck[pack.part]->maxlen, &pack, sizeof(pack));
-		pck[pack.part]->len = sizeof(pack);
-		
-		pck[pack.part]->channel = -1;
-		pck[pack.part]->address.host = srvadd.host;
-		pck[pack.part]->address.port = srvadd.port;
-
-		dtPos += dtSize;
-		pack.part++;
-	}
-
-	for (int i = 0; i < pack.part; i++) {
-		pck[i]->data[offsetof(struct avpkt, totalparts)] = pack.part;
-	}
-
-	SDLNet_UDP_SendV(*s, pck, pack.part);
-	
-	SDLNet_FreePacketV(pck);
-}*/
-
-bool loadVideo() {
-	//Load the video
-	if (avformat_open_input(&pInputFormatCtx, fileName, NULL, 0) != 0)
-		return false;
-
-	//Find video Stream
-	if (avformat_find_stream_info(pInputFormatCtx, 0) < 0)
-		return false;
-
-	videoStream = INT_MAX;
-	for (unsigned int i = 0; i < pInputFormatCtx->nb_streams; i++) {
-		if (pInputFormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
-			videoStream = i;
-			break;
+	/* Cb and Cr */
+	for (y = 0; y < height / 2; y++) {
+		for (x = 0; x < width / 2; x++) {
+			pict->data[1][y * pict->linesize[1] + x] = 128 + y + i * 2;
+			pict->data[2][y * pict->linesize[2] + x] = 64 + x + i * 5;
 		}
 	}
-	if (videoStream == INT_MAX)
-		return false;
-
-	//Create and Open Codec
-	pInputCodecContext = pInputFormatCtx->streams[videoStream]->codec;
-	pInputCodec = avcodec_find_decoder(pInputCodecContext->codec_id);
-
-	if (pInputCodec == NULL)
-		return false;
-
-	if (avcodec_open2(pInputCodecContext, pInputCodec, 0) < 0)
-		return false;
-
-	if (pInputCodecContext->time_base.num > 1000 && pInputCodecContext->time_base.den == 1)
-		pInputCodecContext->time_base.den = 1000;
-
-	return true;
 }
-
-void allocFrames() {
-	//Allocate frames
-	pFrame = av_frame_alloc();
+/*
+int allocFrames() {
+	//Allocate frame
 	pOutFrame = av_frame_alloc();
 
-	/* Set up output frame */
+	//Set up output frame
 	pOutFrame->width = OUTWIDTH;
 	pOutFrame->height = OUTHEIGHT;
 	pOutFrame->format = OUTPXFMT;
@@ -121,7 +79,10 @@ void allocFrames() {
 
 	//Fill the output frame
 	avpicture_fill((AVPicture *)pOutFrame, pOutFrameBuffer, OUTPXFMT, OUTWIDTH, OUTHEIGHT);
+
+	return numBytes;
 }
+*/
 
 void initTX() {
 	//Init SDLNet
@@ -136,197 +97,273 @@ void initTX() {
 #endif
 }
 
-bool initOPFrame() {
-	//This should be same on receiving end
-	avr.den = pInputCodecContext->time_base.den;
-	avr.num = pInputCodecContext->time_base.num;
-	outCodec = avcodec_find_encoder(OUTCODEC);
-	pOutputCodecContext = avcodec_alloc_context3(outCodec);
-	pOutputCodecContext->bit_rate = bitRate;
-	pOutputCodecContext->width = OUTWIDTH;
-	pOutputCodecContext->height = OUTHEIGHT;
-	pOutputCodecContext->pix_fmt = OUTPXFMT;
-	pOutputCodecContext->time_base = avr;
-	pOutputCodecContext->max_b_frames = 8;
+class Writer {
+private:
+	AVIOContext* pAVIO;
+	uint8_t* outWriteBuffer;
+	//FILE* f;
+public:
+	Writer() {
+		//f = fopen("D:\\test.flv", "wb");
+		outWriteBuffer = (uint8_t*)av_malloc(1024);
 
-	m_outformat = avformat_alloc_context();
-	pAVIO = avio_alloc_context(outWriteBuffer, sizeof(outWriteBuffer), AVIO_FLAG_WRITE, nullptr,
-		nullptr, [](void* opaque, unsigned char* buf, int buf_size) -> int {
-			
+		pAVIO = avio_alloc_context(outWriteBuffer, sizeof(outWriteBuffer), AVIO_FLAG_WRITE, this,
+			nullptr,
 
-			return buf_size;
-		}, nullptr);
+			[](void* opaque, unsigned char* buf, int buf_size) -> int {
+				outStream->send(buf, buf_size);
 
-	pOutputFormat = av_guess_format(NULL, NULL, "video/mp4");
-	m_outformat->oformat = pOutputFormat;
-	outVideoStream = avformat_new_stream(m_outformat, outCodec);
-	m_outformat->pb = pAVIO;
+				return buf_size;//fwrite(buf, 1, buf_size, ((Writer*)opaque)->f);
+			},
 
-
-	if (avcodec_open2(pOutputCodecContext, outCodec, NULL) < 0) {
-		std::cout << "Could not open codec" << std::endl;
-		return false;
+			[](void* opaque, int64_t offset, int whence) -> int64_t {
+				return offset;//fseek(((Writer*)opaque)->f, offset, whence);
+			}
+		);
 	}
 
-	//To convert the video to suitable format
-	sws_ctx = sws_getContext(
-		pInputCodecContext->width,
-		pInputCodecContext->height,
-		pInputCodecContext->pix_fmt,
-		OUTWIDTH,
-		OUTHEIGHT,
-		OUTPXFMT,
-		SWS_BICUBIC,
-		NULL,
-		NULL,
-		NULL
-	);
+	~Writer() {
+		av_freep(&outWriteBuffer);
+		//fclose(f);
+	}
 
-	avformat_write_header(m_outformat, NULL);
+	AVIOContext* getIOContext() {
+		return pAVIO;
+	}
+};
 
-	return true;
-}
+class Muxer {
+private:
+	AVFormatContext* pFormatCtx;
+public:
+	Muxer(Writer* wr, const char* ext) {
+		pFormatCtx = avformat_alloc_context();
+		pFormatCtx->oformat = av_guess_format(NULL, ext, NULL);
+		pFormatCtx->pb = wr->getIOContext();
+	}
+
+	void WriteHeader() {
+		avformat_write_header(pFormatCtx, nullptr);
+	}
+
+	void WriteTrailer() {
+		av_write_trailer(pFormatCtx);
+	}
+
+	void WritePacket(AVPacket* pck) {
+		if (pck == nullptr) return;
+		av_interleaved_write_frame(pFormatCtx, pck);
+	}
+
+	AVFormatContext* getFormatContext() {
+		return pFormatCtx;
+	}
+};
+
+class Frame {
+private:
+	AVFrame* pFrame;
+	uint8_t* pFrameBuffer;
+	int pFrameBufferSize;
+public:
+	Frame(int width, int height, int format) {
+		pFrame = av_frame_alloc();
+		pFrame->width = width;
+		pFrame->height = height;
+		pFrame->format = format;
+		pFrame->pts = 0;
+
+		pFrameBufferSize = avpicture_get_size(OUTPXFMT, OUTWIDTH, OUTHEIGHT);
+		pFrameBuffer = (uint8_t*)av_malloc(pFrameBufferSize);
+
+		//Fill the output frame
+		//av_image_fill_arrays
+		avpicture_fill((AVPicture*)pFrame, pFrameBuffer, OUTPXFMT, OUTWIDTH, OUTHEIGHT);
+	}
+
+	void setPTS(int pts) {
+		pFrame->pts = pts;
+	}
+
+	AVFrame* getFrame() {
+		return pFrame;
+	}
+
+	int getWidth() {
+		return pFrame->width;
+	}
+
+	int getHeight() {
+		return pFrame->height;
+	}
+
+	int getFormat() {
+		return pFrame->format;
+	}
+
+	~Frame() {
+		av_frame_free(&pFrame);
+		av_freep(&pFrameBuffer);
+	}
+};
+
+class Stream {
+private:
+	AVStream* outVideoStream;
+	AVCodec* outCodec;
+	AVPacket* outPkt;
+	AVCodecContext* pOutputCodecContext;
+	Muxer* parentMuxer;
+	Frame* encFrame;
+	static int DTS;
+
+public:
+	Stream(Muxer* m, AVCodecID codec, Frame* encFrame, int bitRate=3200000) {
+		parentMuxer = m;
+		this->encFrame = encFrame;
+		outCodec = avcodec_find_encoder(codec);
+
+		outVideoStream = avformat_new_stream(m->getFormatContext(), outCodec);
+		
+		AVCodecParameters* streamParameters = outVideoStream->codecpar;
+		streamParameters->width = encFrame->getWidth();
+		streamParameters->height = encFrame->getHeight();
+		streamParameters->format = encFrame->getFormat();
+		streamParameters->codec_id = codec;
+		streamParameters->bit_rate = bitRate;
+		streamParameters->codec_type = avcodec_get_type(codec);
+		outVideoStream->id = m->getFormatContext()->nb_streams - 1;
+		outVideoStream->time_base.num = 1;
+		outVideoStream->time_base.den = 30;
+
+		pOutputCodecContext = avcodec_alloc_context3(outCodec);
+
+		avcodec_parameters_to_context(pOutputCodecContext, streamParameters);
+		pOutputCodecContext->width = streamParameters->width;
+		pOutputCodecContext->height = streamParameters->height;
+		pOutputCodecContext->bit_rate = bitRate;
+		pOutputCodecContext->time_base.num = 1;
+		pOutputCodecContext->time_base.den = 30;
+
+		switch (streamParameters->codec_type) {
+		case AVMEDIA_TYPE_VIDEO:
+			pOutputCodecContext->pix_fmt = (AVPixelFormat)streamParameters->format;
+			break;
+		case AVMEDIA_TYPE_AUDIO:
+			pOutputCodecContext->sample_fmt = (AVSampleFormat)streamParameters->format;
+			break;
+		}
+
+		avcodec_open2(pOutputCodecContext, outCodec, NULL);
+		avcodec_parameters_from_context(streamParameters, pOutputCodecContext);
+
+		outVideoStream->avg_frame_rate = av_inv_q(outVideoStream->time_base);
+
+		outPkt = av_packet_alloc();
+	}
+
+	int Encode(int64_t framePos, void(*callback)(Stream*, AVPacket*)) {
+		int ret;
+
+		encFrame->getFrame()->pts += 1;//av_rescale_q(1, pOutputCodecContext->time_base, outVideoStream->time_base);
+
+		ret = avcodec_send_frame(pOutputCodecContext, encFrame->getFrame());
+
+		while (ret >= 0) {
+			ret = avcodec_receive_packet(pOutputCodecContext, outPkt);
+			
+			if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
+				break;
+			else if (ret < 0)
+				return ret;
+
+			callback(this, outPkt);
+
+			av_packet_unref(outPkt);
+		}
+
+		return ret;
+	}
+
+	AVCodecContext* getCodecContext() {
+		return pOutputCodecContext;
+	}
+
+	Muxer* getMuxer() {
+		return parentMuxer;
+	}
+
+	~Stream() {
+		avcodec_free_context(&pOutputCodecContext);
+		av_free_packet(outPkt);
+	}
+};
+int Stream::DTS = 0;
 
 void freeAll() {
-	avcodec_free_context(&pInputCodecContext);
-	sws_freeContext(sws_ctx);
-	avcodec_free_context(&pOutputCodecContext);
-
-	av_frame_free(&pFrame);
-	av_frame_free(&pOutFrame);
-
-	av_free(pOutFrameBuffer);
-
-	av_packet_free(&inPkt);
-	av_packet_free(&outPkt);
-
 	outStream->close();
 }
 
-void allocPck() {
-	inPkt = av_packet_alloc();
-	outPkt = av_packet_alloc();
+/* RX SOLUTION!!!! */
+/*
+AVCodecParserContext* cpc;
+cpc = av_parser_init(OUTCODEC);
+
+uint8_t* in_data = outPkt->data;
+int in_len = outPkt->size;
+
+uint8_t* data;
+int size, len;
+
+while (in_len) {
+	len = av_parser_parse2(cpc, pOutputCodecContext, &data, &size, outPkt->data, outPkt->size, outPkt->pts, outPkt->dts, 0);
+
+	in_data += len;
+	in_len -= len;
+
+	if (size)
+		decode(data, size);
+}*/
+
+void sendPacket(Stream* s, AVPacket* pck) {
+#ifdef USECONTAINER
+	s->getMuxer()->WritePacket(pck);
+#else
+	outStream->send(pck->data, pck->size);
+#endif
 }
 
 int main() {
-	/* Debug information */
-	Timer t, updateTim;
-	int mxSize = 0, totalSize = 0, lastPkSize = 0, prevTotal = 0;
 	int frames = 0;
 
-	//Presentation Timestamp for encoder
-	int pts_ct = 0;
-
-	if (!loadVideo())
-		return EXIT_FAILURE;
-
-	allocFrames();
-	
 	initTX();
-	
-	if (!initOPFrame())
-		return EXIT_FAILURE;
-	
-	allocPck();
 
-	std::cout << "Beginning transcoding..." << std::endl;
+	Frame* img = new Frame(OUTWIDTH, OUTHEIGHT, OUTPXFMT);
+	Frame* img2 = new Frame(640, 480, OUTPXFMT);
 
-	//Transcode loop
-	do {
-		frames = 0;
-		av_seek_frame(pInputFormatCtx, videoStream, 0, 0);
+	Writer* w = new Writer();
+	Muxer* f = new Muxer(w, OUTCNT);
 
-		while (av_read_frame(pInputFormatCtx, inPkt) >= 0) {
-			t.reset();
-			double elapsed = 0.0;
+	Stream* s = new Stream(f, OUTCODEC, img);
+	Stream* s2 = new Stream(f, OUTCODEC, img2);
 
-			if (inPkt->stream_index == videoStream) {
-				int ret = avcodec_send_packet(pInputCodecContext, inPkt);
-				while (ret >= 0) {
-					ret = avcodec_receive_frame(pInputCodecContext, pFrame);
-					if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-						break;
-					else if (ret < 0)
-						return EXIT_FAILURE;
-
-					/* Post processing */
-
-					//Scale the frame to suit the output
-					sws_scale(sws_ctx,
-						(uint8_t const* const*)pFrame->data,
-						pFrame->linesize, 0, pInputCodecContext->height,
-						pOutFrame->data, pOutFrame->linesize);
-
-					pOutFrame->pts = pts_ct++;
-
-					//Encode the new frame
-					ret = avcodec_send_frame(pOutputCodecContext, pOutFrame);
-
-					while (ret >= 0) {
-						ret = avcodec_receive_packet(pOutputCodecContext, outPkt);
-						if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
-							break;
-						else if (ret < 0) {
-							std::cout << "Error during encoding" << std::endl;
-							return EXIT_FAILURE;
-						}
-
-						//Record peak data size
-						mxSize = std::max(mxSize, outPkt->size);
-						totalSize += outPkt->size;
-						lastPkSize = outPkt->size;
-
-						/* RX SOLUTION!!!! */
-						/*
-						AVCodecParserContext* cpc;
-						cpc = av_parser_init(OUTCODEC);
-
-						uint8_t* in_data = outPkt->data;
-						int in_len = outPkt->size;
-
-						uint8_t* data;
-						int size, len;
-
-						while (in_len) {
-							len = av_parser_parse2(cpc, pOutputCodecContext, &data, &size, outPkt->data, outPkt->size, outPkt->pts, outPkt->dts, 0);
-
-							in_data += len;
-							in_len -= len;
-
-							if (size)
-								decode(data, size);
-						}*/
-
-
-						av_interleaved_write_frame(m_outformat, outPkt);
-
-						//Send the frame packet
-						
-						//outStream->send(outPkt->data, outPkt->size);
-
-						frames++;
-						elapsed = t.elapsed() * 1000.0;
-
-						av_packet_unref(outPkt);
-					}
-				}
-
-				if (updateTim.elapsed() > 0.25 && frames > 0) {
-					int average = totalSize / frames;
-					std::cout << "F:" << frames << ", " << lastPkSize << "B, MAX: " << mxSize << "B, ALL: " << totalSize << "B, AVG: " << average << "B/F (" << ((totalSize - prevTotal) * avr.den / avr.num) << "B/s" << "), T:" << elapsed << "ms (potential " << (1000.0 / elapsed) << "fps)    \r";
-					prevTotal = totalSize;
-					updateTim.reset();
-				}
-
-#ifdef THROTTLE
-				//Sleep to maintain framerate if possible
-				Sleep((DWORD)std::max(1000 * avr.num / avr.den - elapsed, 0.0));
+#ifdef USECONTAINER
+	f->WriteHeader();
 #endif
-			}
 
-			av_packet_unref(inPkt);
-		}
-	} while (repeatTimes--);
+	while (frames < 3000) {
+		fill_yuv_image(img->getFrame(), frames, OUTWIDTH, OUTHEIGHT);
+
+		s->Encode(frames, sendPacket);
+		//s2->Encode(frames, sendPacket);
+
+		Sleep(10);
+		frames++;
+	}
+
+#ifdef USECONTAINER
+	f->WriteTrailer();
+#endif
 
 	freeAll();
 

@@ -1,11 +1,11 @@
 #pragma once
 
-#include "Stream.h"
+#include "WriteStream.h"
 
 #include <memory>
 #include <SDL2/SDL_net.h>
 
-class UDPStream : public Stream {
+class UDPStream : public WriteStream {
 private:
 	UDPsocket sock;
 	IPaddress srvadd;

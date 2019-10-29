@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-class Stream {
+class WriteStream {
 public:
 	virtual void open() {};
 	virtual void close() = 0;
